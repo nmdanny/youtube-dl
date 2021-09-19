@@ -1,5 +1,6 @@
 # flake8: noqa
 from __future__ import unicode_literals
+from youtube_dl.extractor.panopto import PanoptoIE
 
 from .abc import (
     ABCIE,
@@ -889,6 +890,7 @@ from .palcomp3 import (
     PalcoMP3VideoIE,
 )
 from .pandoratv import PandoraTVIE
+from .panopto import PanoptoIE
 from .parliamentliveuk import ParliamentLiveUKIE
 from .patreon import PatreonIE
 from .pbs import PBSIE

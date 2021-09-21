@@ -1,9 +1,19 @@
 # coding: utf-8
 from __future__ import unicode_literals
+from sys import stderr
 
 from .common import InfoExtractor
-from ..utils import ExtractorError, urljoin, urlencode_postdata, float_or_none
+from ..utils import ExtractorError, try_get, urljoin, urlencode_postdata, float_or_none
 import re
+import json
+
+
+def handle_error_response(response, video_id):
+    if response.get("ErrorCode") and "Unauthorized" in response.get("ErrorMessage"):
+        raise ExtractorError("Need to login to access Panopto video, pass a cookie file as explained in https://github.com/ytdl-org/youtube-dl#how-do-i-pass-cookies-to-youtube-dl", expected=True)
+    elif response.get("ErrorCode"):
+        error_message = "Got error code %d: %s" % (response.get("ErrorCode"), response.get("ErrorMessage"))
+        raise ExtractorError(error_message, video_id=video_id)
 
 
 class PanoptoIE(InfoExtractor):
@@ -33,24 +43,24 @@ class PanoptoIE(InfoExtractor):
             chapters.append({
                 "start_time": float_or_none(start),
                 "end_time": float_or_none(end),
-                "title": cur_ts.get("Data")
+                "title": cur_ts.get("Caption") or cur_ts.get("Data")
             })
 
         return chapters
 
     def _real_extract(self, url):
-        match = re.match(PanoptoIE._VALID_URL, url)
+        match = re.match(self._VALID_URL, url)
         video_id = match.group('id')
-        delivery_url = urljoin(match.group('panoptoBase'), 'Panopto/Pages/Viewer/DeliveryInfo.aspx')
+        panopto_base = match.group("panoptoBase")
+        return self._download_panopto_video(panopto_base, video_id)
+
+    def _download_panopto_video(self, panopto_base, video_id):
+        delivery_url = urljoin(panopto_base, 'Panopto/Pages/Viewer/DeliveryInfo.aspx')
         response = self._download_json(delivery_url, video_id, data=urlencode_postdata({
             "deliveryId": video_id,
             "responseType": "json"
         }))
-        if response.get("ErrorCode") and "Unauthorized" in response.get("ErrorMessage"):
-            raise ExtractorError("Need to login to access Panopto video, pass a cookie file as explained in https://github.com/ytdl-org/youtube-dl#how-do-i-pass-cookies-to-youtube-dl", expected=True)
-        elif response.get("ErrorCode"):
-            error_message = "Got error code %d: %s" % (response.get("ErrorCode"), response.get("ErrorMessage"))
-            raise ExtractorError(error_message, video_id=video_id)
+        handle_error_response(response, video_id)
         delivery = response["Delivery"]
 
         title = " -> ".join([title_part for title_part in [
@@ -112,4 +122,68 @@ class PanoptoIE(InfoExtractor):
             'duration': delivery.get("Duration"),
             'formats': formats,
             'chapters': self._try_parse_timestamps(delivery)
+        }
+
+
+class PanoptoFolderIE(InfoExtractor):
+    _VALID_URL = r'(?P<panoptoBase>.*)/Panopto/Pages/Sessions/List.aspx#folderID=%22(?P<id>.+)%22'
+    __PAGE_SIZE = 100
+
+    def _real_extract(self, url):
+        match = re.match(self._VALID_URL, url)
+        panopto_base = match.group("panoptoBase")
+        folder_id = match.group('id')
+        get_folder_info_url = urljoin(panopto_base, 'Panopto/Services/Data.svc/GetFolderInfo')
+        folder_response = self._download_json(get_folder_info_url, folder_id,
+                                              data=json.dumps({
+                                                  "folderID": folder_id
+                                              }).encode('utf-8'), headers={
+                                                  "Content-Type": 'application/json'
+                                              })
+
+        handle_error_response(folder_response, folder_id)
+        folder_name = folder_response.get("Name")
+        print("Gotten folder name: %s" % folder_name)
+
+        get_sessions_url = urljoin(panopto_base, 'Panopto/Services/Data.svc/GetSessions')
+
+        def fetch_session(page_num):
+            sessions_response = self._download_json(get_sessions_url, folder_id, data=json.dumps({
+                "queryParameters": {
+                    "folderID": folder_id,
+                    "page": page_num,
+                    "maxResults": self.__PAGE_SIZE,
+                    "includePlaylists": True,
+                    "getFolderData": True,
+                    "responseType": "json"
+                }
+            }).encode('utf-8'), headers={
+                "Content-Type": 'application/json'
+            })
+            handle_error_response(sessions_response, folder_id)
+            return sessions_response
+
+        max_elements = None
+        entries = []
+        extractor = PanoptoIE(self._downloader)
+        page_num = 0
+        while max_elements is None or len(entries) < max_elements:
+            session = fetch_session(page_num)
+            max_elements = session["d"]["TotalNumber"]
+            delivery_ids = [result["DeliveryID"] for result in session["d"]["Results"]]
+            print("Fetching elements for page %d, number of videos: %d"
+                  % (page_num, len(delivery_ids)))
+            for delivery_id in delivery_ids:
+                try:
+                    video_entry = extractor._download_panopto_video(panopto_base, delivery_id)
+                    entries.append(video_entry)
+                except Exception as e:
+                    print("Got error while fetching video ID %s: %s" % (delivery_id, e), file=stderr)
+            page_num += 1
+        
+        return {
+            "_type": "playlist",
+            "title": folder_name,
+            "id": folder_id,
+            "entries": entries
         }

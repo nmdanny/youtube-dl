@@ -54,6 +54,33 @@ class PanoptoIE(InfoExtractor):
         panopto_base = match.group("panoptoBase")
         return self._download_panopto_video(panopto_base, video_id)
 
+    def _stream_to_formats(self, stream, video_id, is_podcast):
+        stream_url = stream.get("StreamUrl")
+        if not stream_url:
+            return []
+        try:
+            formats = []
+            if stream.get("ViewerMediaFileTypeName") == "mp4":
+                formats.append({
+                    "url": stream_url,
+                    "name": stream.get("Name"),
+                    "format_note": "podcast" if is_podcast else None
+                })
+                self._real_extract
+            else: 
+                formats.extend(self._extract_m3u8_formats(
+                    stream_url, video_id, 'mp4',
+                    entry_protocol='m3u8_native', m3u8_id='hls'))
+            for format in formats:
+                format["name"] = format.get("name") or stream.get("Name")
+                format["format_note"] = "podcast" if is_podcast else format.get("format_note")
+            return formats
+        except Exception as e:
+            print(e, file=stderr)
+            return []
+        
+        
+
     def _download_panopto_video(self, panopto_base, video_id):
         delivery_url = urljoin(panopto_base, 'Panopto/Pages/Viewer/DeliveryInfo.aspx')
         response = self._download_json(delivery_url, video_id, data=urlencode_postdata({
@@ -70,37 +97,9 @@ class PanoptoIE(InfoExtractor):
 
         formats = []
         for podcast in delivery.get("PodcastStreams", []):
-            stream_url = podcast.get("StreamUrl")
-            if stream_url:
-                formats.append({
-                    "url": stream_url,
-                    "format_note": "podcast"
-                })
+            formats.extend(self._stream_to_formats(podcast, video_id, is_podcast=True))
         for stream in delivery.get("Streams", []):
-            stream_url = stream.get("StreamUrl")
-            if not stream_url:
-                continue
-            format = {
-                "url": stream_url
-            }
-            stream_name = stream.get("Name") or ""
-            stream_name_match = re.match(r"(?P<filename>.*).*\.(?P<ext>.*)", stream_name)
-            if stream_name_match:
-                stream_name = stream_name_match.group("filename")
-                stream_ext = stream_name_match.group("ext")
-                format["ext"] = stream_ext
-                if "Shared screen" in stream_name:
-                    format["format_note"] = "shared-screen"
-                elif "Speaker view" in stream_name:
-                    format["format_note"] = "speaker-view"
-                else:
-                    format["format_note"] = stream_name
-            elif stream_name:
-                format["format_note"] = stream_name
-            else:
-                format["format_note"] = "unknown"
-
-            formats.append(format)
+            formats.extend(self._stream_to_formats(stream, video_id, is_podcast=False))
 
         if not formats:
             raise ExtractorError("Panopto video doesn't include any Podcast Streams")
@@ -112,7 +111,7 @@ class PanoptoIE(InfoExtractor):
             "shared-screen": 2,
             "speaker-view": 1,
         }
-        formats = sorted(formats, key=lambda fmt: FORMAT_TO_ORDERING.get(fmt["format_note"], 0))
+        formats = sorted(formats, key=lambda fmt: FORMAT_TO_ORDERING.get(fmt.get("format_note", ""), 0))
 
         return {
             'id': video_id,
@@ -174,11 +173,8 @@ class PanoptoFolderIE(InfoExtractor):
             print("Fetching elements for page %d, number of videos: %d"
                   % (page_num, len(delivery_ids)))
             for delivery_id in delivery_ids:
-                try:
-                    video_entry = extractor._download_panopto_video(panopto_base, delivery_id)
-                    entries.append(video_entry)
-                except Exception as e:
-                    print("Got error while fetching video ID %s: %s" % (delivery_id, e), file=stderr)
+                video_entry = extractor._download_panopto_video(panopto_base, delivery_id)
+                entries.append(video_entry)
             page_num += 1
         
         return {
